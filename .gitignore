@@ -1,0 +1,17 @@
+# Xcode generated
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+*.xcscmblueprint
+*.xccheckout
+build/
+
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Word docs (local reference only)
+*.docx
