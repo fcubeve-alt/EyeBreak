@@ -79,3 +79,30 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             DEVELOPMENT_TEAM=""
+
+      # 编译通过不代表资源和扩展真的进了 App 包，这里逐项断言产物。
+      - name: Verify app bundle contents
+        run: |
+          set -euo pipefail
+          APP=$(find ~/Library/Developer/Xcode/DerivedData -type d -name "EyeBreak.app" -path "*Debug-iphoneos*" | head -1)
+          test -n "$APP" || { echo "::error::EyeBreak.app not found"; exit 1; }
+          echo "app bundle: $APP"
+          fail=0
+
+          if [ -f "$APP/eye_exercise.mp4" ]; then
+            echo "ok   eye_exercise.mp4 ($(du -h "$APP/eye_exercise.mp4" | cut -f1))"
+          else
+            echo "::error::eye_exercise.mp4 missing from app bundle"
+            fail=1
+          fi
+
+          for ext in DeviceActivityReport DeviceActivityMonitor ShieldConfiguration ShieldAction; do
+            if [ -d "$APP/PlugIns/$ext.appex" ]; then
+              echo "ok   $ext.appex embedded"
+            else
+              echo "::error::$ext.appex not embedded"
+              fail=1
+            fi
+          done
+
+          exit $fail
