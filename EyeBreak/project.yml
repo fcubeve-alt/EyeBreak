@@ -31,10 +31,10 @@ targets:
       - path: EyeBreak
         excludes: ["**/*.entitlements"]
       - path: Shared
-    entitlements:
-      path: EyeBreak/EyeBreak.entitlements
-    info:
-      path: EyeBreak/Info.plist
+    # 注意：不要用 XcodeGen 的 info: / entitlements: 键——它们是「生成」语义，
+    # 会用默认内容覆盖仓库里手写的文件，扩展的 NSExtensionPointIdentifier 和
+    # Family Controls 权限都会被冲掉（编译照样通过，但运行时全部失效）。
+    # 一律通过下面的 INFOPLIST_FILE / CODE_SIGN_ENTITLEMENTS 指向真实文件。
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.eyebreak.app
@@ -65,10 +65,6 @@ targets:
       - path: DeviceActivityReport
         excludes: ["**/*.entitlements"]
       - path: Shared
-    entitlements:
-      path: DeviceActivityReport/DeviceActivityReport.entitlements
-    info:
-      path: DeviceActivityReport/Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.eyebreak.app.report
@@ -88,10 +84,6 @@ targets:
       - path: DeviceActivityMonitor
         excludes: ["**/*.entitlements"]
       - path: Shared
-    entitlements:
-      path: DeviceActivityMonitor/DeviceActivityMonitor.entitlements
-    info:
-      path: DeviceActivityMonitor/Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.eyebreak.app.monitor
@@ -110,10 +102,6 @@ targets:
       - path: ShieldConfiguration
         excludes: ["**/*.entitlements"]
       - path: Shared
-    entitlements:
-      path: ShieldConfiguration/ShieldConfiguration.entitlements
-    info:
-      path: ShieldConfiguration/Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.eyebreak.app.shieldconfig
@@ -131,10 +119,6 @@ targets:
       - path: ShieldAction
         excludes: ["**/*.entitlements"]
       - path: Shared
-    entitlements:
-      path: ShieldAction/ShieldAction.entitlements
-    info:
-      path: ShieldAction/Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.eyebreak.app.shieldaction

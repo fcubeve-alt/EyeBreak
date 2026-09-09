@@ -24,6 +24,50 @@ jobs:
         working-directory: EyeBreak
         run: xcodegen generate
 
+      # XcodeGen 的 info: / entitlements: 键是「生成」语义，会覆盖仓库里手写的文件。
+      # 一旦发生，扩展照样编译通过，但 NSExtensionPointIdentifier 和 Family Controls
+      # 权限全部丢失，真机上表现为「装得上、什么都不触发」，极难排查。
+      # 这一步在生成之后断言这些关键内容仍然存在。
+      - name: Verify extension plists and entitlements survived generation
+        working-directory: EyeBreak
+        run: |
+          set -euo pipefail
+          fail=0
+
+          check_extension_point () {
+            file="$1"; expected="$2"
+            got=$(/usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$file" 2>/dev/null || echo MISSING)
+            if [ "$got" != "$expected" ]; then
+              echo "::error file=$file::NSExtensionPointIdentifier is '$got', expected '$expected'"
+              fail=1
+            else
+              echo "ok   $file -> $got"
+            fi
+          }
+
+          check_extension_point DeviceActivityReport/Info.plist  com.apple.deviceactivity.report
+          check_extension_point DeviceActivityMonitor/Info.plist com.apple.deviceactivity.monitor
+          check_extension_point ShieldConfiguration/Info.plist   com.apple.ManagedSettings.ShieldConfigurationExtension
+          check_extension_point ShieldAction/Info.plist          com.apple.ManagedSettings.ShieldActionExtension
+
+          for f in EyeBreak/EyeBreak.entitlements \
+                   DeviceActivityReport/DeviceActivityReport.entitlements \
+                   DeviceActivityMonitor/DeviceActivityMonitor.entitlements \
+                   ShieldConfiguration/ShieldConfiguration.entitlements \
+                   ShieldAction/ShieldAction.entitlements; do
+            if ! /usr/libexec/PlistBuddy -c "Print :com.apple.developer.family-controls" "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::missing com.apple.developer.family-controls"
+              fail=1
+            elif ! /usr/libexec/PlistBuddy -c "Print :com.apple.security.application-groups:0" "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::missing App Group"
+              fail=1
+            else
+              echo "ok   $f"
+            fi
+          done
+
+          exit $fail
+
       - name: Build (compile check — signing disabled)
         working-directory: EyeBreak
         run: |
