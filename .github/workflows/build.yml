@@ -28,7 +28,7 @@ jobs:
           xcodebuild build \
             -project EyeBreak.xcodeproj \
             -scheme EyeBreak \
-            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath dd \
             CODE_SIGNING_ALLOWED=NO
 
@@ -41,7 +41,13 @@ jobs:
           test -n "$APP" || { echo "::error::simulator app not built"; exit 1; }
           echo "app: $APP"
 
-          UDID=$(xcrun simctl create eyebreak-preview "iPhone 16")
+          # runner 上具体有哪些机型/系统会变，动态挑一个 iPhone，不写死名字
+          DEVTYPE=$(xcrun simctl list devicetypes -j | python3 -c "import json,sys; d=[x for x in json.load(sys.stdin)['devicetypes'] if 'iPhone' in x['name']]; print(d[-1]['identifier'])")
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c "import json,sys; r=[x for x in json.load(sys.stdin)['runtimes'] if x['isAvailable'] and x['platform']=='iOS']; print(r[-1]['identifier'])")
+          echo "devicetype: $DEVTYPE"
+          echo "runtime:    $RUNTIME"
+
+          UDID=$(xcrun simctl create eyebreak-preview "$DEVTYPE" "$RUNTIME")
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b
 
