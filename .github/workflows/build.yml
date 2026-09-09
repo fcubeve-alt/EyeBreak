@@ -41,13 +41,28 @@ jobs:
           test -n "$APP" || { echo "::error::simulator app not built"; exit 1; }
           echo "app: $APP"
 
-          # runner 上具体有哪些机型/系统会变，动态挑一个 iPhone，不写死名字
-          DEVTYPE=$(xcrun simctl list devicetypes -j | python3 -c "import json,sys; d=[x for x in json.load(sys.stdin)['devicetypes'] if 'iPhone' in x['name']]; print(d[-1]['identifier'])")
-          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c "import json,sys; r=[x for x in json.load(sys.stdin)['runtimes'] if x['isAvailable'] and x['platform']=='iOS']; print(r[-1]['identifier'])")
-          echo "devicetype: $DEVTYPE"
-          echo "runtime:    $RUNTIME"
+          # 直接用 runner 预建好的可用模拟器，避免自己 create 时挑到
+          # 与当前 runtime 不兼容的老机型
+          read -r UDID SIMNAME < <(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)['devices']
+          best = None
+          for runtime, devs in data.items():
+              if 'iOS' not in runtime:
+                  continue
+              for dev in devs:
+                  if dev.get('isAvailable') and 'iPhone' in dev['name']:
+                      best = dev
+                      break
+              if best:
+                  break
+          if not best:
+              sys.exit('no available iPhone simulator')
+          print(best['udid'], best['name'])
+          ")
+          test -n "$UDID" || { echo "::error::no available iPhone simulator"; exit 1; }
+          echo "simulator: $SIMNAME ($UDID)"
 
-          UDID=$(xcrun simctl create eyebreak-preview "$DEVTYPE" "$RUNTIME")
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b
 
