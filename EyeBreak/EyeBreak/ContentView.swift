@@ -8,6 +8,7 @@ struct ContentView: View {
         NavigationStack {
             List {
                 authSection
+                previewSection
                 if manager.authStatus == .approved {
                     monitoringSection
                     layer1Section
@@ -54,6 +55,23 @@ struct ContentView: View {
         case .approved: return .green
         case .denied:   return .red
         default:        return .secondary
+        }
+    }
+
+    // MARK: - 预览（不需要授权）
+
+    var previewSection: some View {
+        Section {
+            Button {
+                manager.showEyeBreak = true
+            } label: {
+                Label("预览护眼界面", systemImage: "eye.fill")
+            }
+        } header: {
+            Text("预览")
+        } footer: {
+            Text("不需要 Screen Time 授权即可查看护眼引导界面与视频播放，用于验证 Kill Test #2 的交互体验（存在感 / 可关闭 / 动作引导）。模拟器亦可运行。")
+                .font(.caption2)
         }
     }
 

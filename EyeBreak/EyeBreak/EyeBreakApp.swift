@@ -13,7 +13,12 @@ struct EyeBreakApp: App {
                 .environmentObject(manager)
                 .onAppear {
                     delegate.manager = manager
-                    checkAndShowBreakIfNeeded()
+                    // -EyeBreakDemo：直接打开护眼界面，供模拟器截图与 UX 验收使用
+                    if ProcessInfo.processInfo.arguments.contains("-EyeBreakDemo") {
+                        manager.showEyeBreak = true
+                    } else {
+                        checkAndShowBreakIfNeeded()
+                    }
                 }
                 .onReceive(NotificationCenter.default.publisher(
                     for: UIApplication.willEnterForegroundNotification)) { _ in

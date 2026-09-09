@@ -8,6 +8,66 @@ on:
   workflow_dispatch:
 
 jobs:
+  # 在模拟器里跑起来并截图。Family Controls 在模拟器不可用，
+  # 但护眼引导界面（Kill Test #2 的验收对象）不依赖任何权限，可以直接验收。
+  preview:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen --quiet
+
+      - name: Generate Xcode project
+        working-directory: EyeBreak
+        run: xcodegen generate
+
+      - name: Build for simulator
+        working-directory: EyeBreak
+        run: |
+          xcodebuild build \
+            -project EyeBreak.xcodeproj \
+            -scheme EyeBreak \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -derivedDataPath dd \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Launch and capture screenshots
+        working-directory: EyeBreak
+        run: |
+          set -euo pipefail
+          mkdir -p shots
+          APP=$(find dd/Build/Products -type d -name "EyeBreak.app" -path "*iphonesimulator*" | head -1)
+          test -n "$APP" || { echo "::error::simulator app not built"; exit 1; }
+          echo "app: $APP"
+
+          UDID=$(xcrun simctl create eyebreak-preview "iPhone 16")
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+
+          xcrun simctl install "$UDID" "$APP"
+
+          # 1) 主界面
+          xcrun simctl launch "$UDID" com.eyebreak.app
+          sleep 6
+          xcrun simctl io "$UDID" screenshot shots/1-main.png
+
+          # 2) 护眼引导界面（含视频入口）
+          xcrun simctl terminate "$UDID" com.eyebreak.app || true
+          xcrun simctl launch "$UDID" com.eyebreak.app -EyeBreakDemo
+          sleep 8
+          xcrun simctl io "$UDID" screenshot shots/2-break-prompt.png
+
+          xcrun simctl shutdown "$UDID" || true
+          ls -la shots
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eyebreak-screenshots
+          path: EyeBreak/shots/*.png
+          if-no-files-found: warn
+
   build:
     runs-on: macos-latest
 
