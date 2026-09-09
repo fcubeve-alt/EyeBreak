@@ -47,7 +47,8 @@ class ShieldActionExtension: ShieldActionDelegate {
             unblock()
             completionHandler(.close)
 
-        @unknown default:
+        // 二级菜单项等其余动作一律按「稍后」处理：解除遮罩、放用户回去
+        default:
             unblock()
             completionHandler(.close)
         }

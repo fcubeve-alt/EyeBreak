@@ -69,8 +69,8 @@ class ScreenTimeManager: ObservableObject {
             authStatus = AuthorizationCenter.shared.authorizationStatus
             addLog("授权：\(authStatus)")
             if authStatus == .approved {
-                UNUserNotificationCenter.current()
-                    .requestAuthorization(options: [.alert, .sound]) { _, _ in }
+                _ = try? await UNUserNotificationCenter.current()
+                    .requestAuthorization(options: [.alert, .sound])
             }
         } catch {
             addLog("授权失败：\(error.localizedDescription)")
