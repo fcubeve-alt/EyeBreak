@@ -4,16 +4,17 @@ import DeviceActivity
 import ManagedSettings
 import UserNotifications
 
-// MARK: - Activity / Event name extensions (main app target)
+// MARK: - 名称（与 Monitor 扩展保持一致）
 
 extension DeviceActivityName {
-    static let eyeBreakWindowed = DeviceActivityName("com.eyebreak.monitor.windowed")
-    static let eyeBreakDaily    = DeviceActivityName("com.eyebreak.monitor.daily")
+    static let eyeBreakUsage = DeviceActivityName("com.eyebreak.monitor.usage")
+    // 旧版本遗留，stopMonitoring 时一并停掉
+    static let legacyWindowed = DeviceActivityName("com.eyebreak.monitor.windowed")
+    static let legacyDaily    = DeviceActivityName("com.eyebreak.monitor.daily")
 }
 
 extension DeviceActivityEvent.Name {
-    static let windowThreshold  = DeviceActivityEvent.Name("eyebreak.windowThreshold")
-    static let dailyThreshold   = DeviceActivityEvent.Name("eyebreak.dailyThreshold")
+    static func milestone(_ minutes: Int) -> Self { Self("eyebreak.milestone.\(minutes)") }
 }
 
 // MARK: - Manager
@@ -21,31 +22,30 @@ extension DeviceActivityEvent.Name {
 @MainActor
 class ScreenTimeManager: ObservableObject {
 
-    // Auth
     @Published var authStatus: AuthorizationStatus = .notDetermined
-
-    // Monitoring
     @Published var isMonitoring = false
-    @Published var debugWindowMinutes = 2   // set low for testing; 5 for production
 
-    // Layer 1 (longestActivity — written by DeviceActivityReport extension)
+    /// 目标连续用屏分钟数。真机 POC 阶段先设 2–5 分钟（v0.3 步骤 2），正式为 30。
+    /// 这个值会写入共享存储，扩展读取同一个值，保证三个 target 阈值一致。
+    @Published var targetMinutes: Int = EyeBreakConfig.defaultTargetMinutes
+    @Published var layer3Minutes: Int = EyeBreakConfig.defaultLayer3Minutes
+
+    // Layer 1
     @Published var longestActivityMinutes: Double = 0
-    @Published var layer1UpdatedAt: Date?
+    @Published var layer1WrittenAt: Date?        // 我们写入的时刻
+    @Published var appleLastUpdatedDate: Date?   // Apple 的 lastUpdatedDate（POC 1）
+    @Published var layer1IsFresh = false
+    @Published var segmentCount = 0
 
-    // Layer 2 (consecutive short windows)
-    @Published var consecutiveWindows: Int = 0
-    @Published var windowsNeeded: Int = EyeBreakConfig.consecutiveWindowsNeeded
+    // Layer 2
+    @Published var lastMilestoneMinutes = 0
+    @Published var observedDensity: Double = 0
 
-    // Layer 3 (daily total)
+    // Layer 3
     @Published var totalActivityMinutes: Double = 0
 
-    // Active layer that triggered (or "")
     @Published var activeLayer: String = ""
-
-    // Eye break
     @Published var showEyeBreak = false
-
-    // Log
     @Published var log: [String] = []
 
     private let center = DeviceActivityCenter()
@@ -54,10 +54,14 @@ class ScreenTimeManager: ObservableObject {
 
     init() {
         authStatus = AuthorizationCenter.shared.authorizationStatus
+        let db = UserDefaults.eyeBreak
+        db.eb_resetDailyStateIfNeeded()
+        targetMinutes = db.eb_targetMinutes
+        layer3Minutes = db.eb_layer3Minutes
         startRefreshTimer()
     }
 
-    // MARK: - Authorization
+    // MARK: - 授权
 
     func requestAuthorization() async {
         do {
@@ -65,72 +69,66 @@ class ScreenTimeManager: ObservableObject {
             authStatus = AuthorizationCenter.shared.authorizationStatus
             addLog("授权：\(authStatus)")
             if authStatus == .approved {
-                requestNotificationPermission()
+                UNUserNotificationCenter.current()
+                    .requestAuthorization(options: [.alert, .sound]) { _, _ in }
             }
         } catch {
             addLog("授权失败：\(error.localizedDescription)")
         }
     }
 
-    // MARK: - Start monitoring (all three layers)
+    // MARK: - 启动监测
 
     func startMonitoring() {
-        resetState()
+        let db = UserDefaults.eyeBreak
+        // 配置下发给扩展（修复：过去扩展硬编码 30 分钟，测试阈值根本传不进去）
+        db.set(targetMinutes, forKey: EyeBreakKey.targetMinutes)
+        db.set(layer3Minutes, forKey: EyeBreakKey.layer3Minutes)
+        db.eb_resetDetectionState()
+        db.set(false, forKey: EyeBreakKey.shouldShowEyeBreak)
+        db.set("",    forKey: EyeBreakKey.activeLayer)
+        db.removeObject(forKey: EyeBreakKey.cooldownUntil)
+
+        let schedule = DeviceActivitySchedule(
+            intervalStart: DateComponents(hour: 0, minute: 0, second: 0),
+            intervalEnd:   DateComponents(hour: 23, minute: 59, second: 59),
+            repeats: true
+        )
+
+        // 一排递增阈值。每个阈值在本区间内只会触发一次，
+        // Monitor 靠相邻两次回调的时钟间隔判断使用密度。
+        let steps = EyeBreakConfig.milestones(for: targetMinutes)
+        var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
+        for m in steps {
+            events[.milestone(m)] = DeviceActivityEvent(
+                applications: [],   // 空集合 = 覆盖全部 App / 类别 / 网站
+                categories: [],
+                webDomains: [],
+                threshold: DateComponents(minute: m)
+            )
+        }
 
         do {
-            // ── Layer 2: 5-min rolling windows ───────────────────────────────
-            // Each 24h interval with repeats=true + a threshold event.
-            // The monitor extension tracks consecutive threshold-reached events.
-            let windowSchedule = DeviceActivitySchedule(
-                intervalStart: DateComponents(hour: 0, minute: 0, second: 0),
-                intervalEnd:   DateComponents(hour: 23, minute: 59, second: 59),
-                repeats: true
-            )
-            let windowEvent = DeviceActivityEvent(
-                applications: [],   // empty = all apps
-                categories: [],
-                webDomains: [],
-                threshold: DateComponents(minute: max(1, debugWindowMinutes - 1))
-            )
-            try center.startMonitoring(
-                .eyeBreakWindowed,
-                during: windowSchedule,
-                events: [.windowThreshold: windowEvent]
-            )
-
-            // ── Layer 3: daily total ─────────────────────────────────────────
-            // Simple: fire once when total screen use hits 30 min today.
-            let dailySchedule = DeviceActivitySchedule(
-                intervalStart: DateComponents(hour: 0, minute: 0, second: 0),
-                intervalEnd:   DateComponents(hour: 23, minute: 59, second: 59),
-                repeats: true
-            )
-            let dailyEvent = DeviceActivityEvent(
-                applications: [],
-                categories: [],
-                webDomains: [],
-                threshold: DateComponents(minute: 30)
-            )
-            try center.startMonitoring(
-                .eyeBreakDaily,
-                during: dailySchedule,
-                events: [.dailyThreshold: dailyEvent]
-            )
-
+            try center.startMonitoring(.eyeBreakUsage, during: schedule, events: events)
             isMonitoring = true
-            addLog("监测已启动 — Layer 2 窗口阈值: \(max(1, debugWindowMinutes - 1))分钟 | Layer 3 日总量: 30分钟")
+            addLog("监测启动 — 目标 \(targetMinutes) 分钟连续 | 里程碑 \(steps.map(String.init).joined(separator: "/")) 分钟")
+            addLog("连续判定：\(EyeBreakConfig.continuityUsageSpan(for: targetMinutes)) 分钟用量须在 \(EyeBreakConfig.continuityWallLimit(for: targetMinutes)) 分钟真实时间内完成")
         } catch {
             addLog("启动失败：\(error.localizedDescription)")
         }
     }
 
     func stopMonitoring() {
-        center.stopMonitoring([.eyeBreakWindowed, .eyeBreakDaily])
+        center.stopMonitoring([.eyeBreakUsage, .legacyWindowed, .legacyDaily])
         isMonitoring = false
-        addLog("监测已停止")
+        unshield()
+        let db = UserDefaults.eyeBreak
+        db.set(false, forKey: EyeBreakKey.shouldShowEyeBreak)
+        db.set("",    forKey: EyeBreakKey.activeLayer)
+        addLog("监测已停止，Shield 已解除")
     }
 
-    // MARK: - Eye break actions
+    // MARK: - 护眼流程
 
     func manualTrigger() {
         addLog("手动触发")
@@ -141,7 +139,6 @@ class ScreenTimeManager: ObservableObject {
         let until = Date().addingTimeInterval(Double(EyeBreakConfig.cooldownMinutes * 60))
         let db = UserDefaults.eyeBreak
         db.set(until, forKey: EyeBreakKey.cooldownUntil)
-        db.set(0,     forKey: EyeBreakKey.consecutiveActiveWindows)
         db.set(false, forKey: EyeBreakKey.shouldShowEyeBreak)
         db.set("",    forKey: EyeBreakKey.activeLayer)
         unshield()
@@ -150,8 +147,9 @@ class ScreenTimeManager: ObservableObject {
     }
 
     func completeEyeBreak() {
-        let count = UserDefaults.eyeBreak.integer(forKey: EyeBreakKey.eyeBreakCount) + 1
-        UserDefaults.eyeBreak.set(count, forKey: EyeBreakKey.eyeBreakCount)
+        let db = UserDefaults.eyeBreak
+        let count = db.integer(forKey: EyeBreakKey.eyeBreakCount) + 1
+        db.set(count, forKey: EyeBreakKey.eyeBreakCount)
         dismissEyeBreak()
         addLog("护眼完成 🎉 今日第 \(count) 次")
     }
@@ -159,62 +157,62 @@ class ScreenTimeManager: ObservableObject {
     func unshield() {
         store.shield.applicationCategories = nil
         store.shield.webDomainCategories   = nil
+        UserDefaults.eyeBreak.removeObject(forKey: EyeBreakKey.shieldAppliedAt)
     }
 
-    // MARK: - Private
-
-    private func resetState() {
+    /// 兜底：Shield 超时未解除则强制清掉，避免用户被锁死
+    func releaseShieldIfStale() {
+        guard UserDefaults.eyeBreak.eb_shieldIsStale else { return }
+        unshield()
         let db = UserDefaults.eyeBreak
-        db.set(0,      forKey: EyeBreakKey.consecutiveActiveWindows)
-        db.set(false,  forKey: EyeBreakKey.shouldShowEyeBreak)
-        db.set("",     forKey: EyeBreakKey.activeLayer)
-        db.removeObject(forKey: EyeBreakKey.lastActiveWindowEndTime)
+        db.set(false, forKey: EyeBreakKey.shouldShowEyeBreak)
+        db.set("",    forKey: EyeBreakKey.activeLayer)
+        addLog("⚠️ Shield 超时，已自动解除")
     }
 
-    private func startRefreshTimer() {
-        // Poll shared UserDefaults every 3 seconds to update the diagnostic UI
-        // and catch triggers from extensions (which run in separate processes).
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.syncFromDefaults() }
-        }
-    }
+    // MARK: - 同步
 
-    private func syncFromDefaults() {
+    func syncFromDefaults() {
         let db = UserDefaults.eyeBreak
+        db.eb_resetDailyStateIfNeeded()
+        releaseShieldIfStale()
 
         longestActivityMinutes = db.double(forKey: EyeBreakKey.longestActivitySeconds) / 60
-        layer1UpdatedAt        = db.object(forKey: EyeBreakKey.longestActivityUpdatedAt) as? Date
+        layer1WrittenAt        = db.object(forKey: EyeBreakKey.longestActivityUpdatedAt) as? Date
+        appleLastUpdatedDate   = db.object(forKey: EyeBreakKey.appleLastUpdatedDate) as? Date
+        layer1IsFresh          = db.eb_layer1IsFresh
+        segmentCount           = db.integer(forKey: EyeBreakKey.segmentCount)
         totalActivityMinutes   = db.double(forKey: EyeBreakKey.totalActivitySeconds) / 60
-        consecutiveWindows     = db.integer(forKey: EyeBreakKey.consecutiveActiveWindows)
+        lastMilestoneMinutes   = db.integer(forKey: EyeBreakKey.lastMilestoneMinutes)
+        observedDensity        = db.double(forKey: EyeBreakKey.observedDensity)
         activeLayer            = db.string(forKey: EyeBreakKey.activeLayer) ?? ""
 
-        // Layer 1 check: if longestActivity ≥ threshold and no cooldown
-        let longestSecs = db.double(forKey: EyeBreakKey.longestActivitySeconds)
-        let thresholdSecs = Double(debugWindowMinutes * 60)
-        let notInCooldown: Bool = {
-            guard let until = db.object(forKey: EyeBreakKey.cooldownUntil) as? Date else { return true }
-            return Date() >= until
-        }()
-        if longestSecs >= thresholdSecs, notInCooldown, !db.bool(forKey: EyeBreakKey.shouldShowEyeBreak) {
-            db.set(true,  forKey: EyeBreakKey.shouldShowEyeBreak)
-            db.set("1",   forKey: EyeBreakKey.activeLayer)
-            addLog("Layer 1 触发：longestActivity = \(String(format: "%.1f", longestSecs / 60)) 分钟")
+        // Layer 1：只有数据新鲜才采信（修复：陈旧的昨日长会话会误触发）
+        if layer1IsFresh,
+           db.double(forKey: EyeBreakKey.longestActivitySeconds) >= Double(targetMinutes * 60),
+           !db.eb_inCooldown,
+           !db.eb_alreadyTriggered {
+            db.set(true, forKey: EyeBreakKey.shouldShowEyeBreak)
+            db.set("1",  forKey: EyeBreakKey.activeLayer)
+            addLog("Layer 1 触发：longestActivity = \(String(format: "%.1f", longestActivityMinutes)) 分钟")
         }
 
-        // Show eye break if flagged
-        if db.bool(forKey: EyeBreakKey.shouldShowEyeBreak), !showEyeBreak {
+        if db.eb_alreadyTriggered, !showEyeBreak {
             showEyeBreak = true
         }
     }
 
-    private func requestNotificationPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    private func startRefreshTimer() {
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.syncFromDefaults() }
+        }
     }
 
     func addLog(_ msg: String) {
         let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         let entry = "[\(ts)] \(msg)"
         log.append(entry)
+        if log.count > 200 { log.removeFirst(log.count - 200) }
         print("EyeBreak: \(entry)")
     }
 }

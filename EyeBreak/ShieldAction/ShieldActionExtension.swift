@@ -3,8 +3,8 @@ import Foundation
 
 class ShieldActionExtension: ShieldActionDelegate {
 
-    private let store    = ManagedSettingsStore()
-    private let defaults = UserDefaults(suiteName: EyeBreakConfig.appGroupID)!
+    private let store = ManagedSettingsStore()
+    private var defaults: UserDefaults { UserDefaults.eyeBreak }
 
     override func handle(action: ShieldAction,
                          for application: ApplicationToken,
@@ -31,17 +31,17 @@ class ShieldActionExtension: ShieldActionDelegate {
         switch action {
 
         case .primaryButtonPressed:
-            // 用户点"做护眼动作"：解除 Shield，让用户能切换到 EyeBreak 主 App
+            // 用户点"做护眼动作"：解除 Shield，让用户能切换到 EyeBreak 主 App。
+            // 不覆盖 activeLayer——保留真正触发的那一层，否则 POC 记录会失真。
             defaults.set(true, forKey: EyeBreakKey.shouldShowEyeBreak)
-            defaults.set("1",  forKey: EyeBreakKey.activeLayer)
             unblock()
             completionHandler(.close)
 
         case .secondaryButtonPressed:
-            // 用户点"稍后再说"：解除 Shield，设冷却期，重置连续计数
+            // 用户点"稍后再说"：解除 Shield，设冷却期，清空连续链
             let cooldown = Date().addingTimeInterval(Double(EyeBreakConfig.cooldownMinutes * 60))
             defaults.set(cooldown, forKey: EyeBreakKey.cooldownUntil)
-            defaults.set(0,     forKey: EyeBreakKey.consecutiveActiveWindows)
+            defaults.removeObject(forKey: EyeBreakKey.milestoneHits)
             defaults.set(false, forKey: EyeBreakKey.shouldShowEyeBreak)
             defaults.set("",    forKey: EyeBreakKey.activeLayer)
             unblock()
@@ -56,5 +56,6 @@ class ShieldActionExtension: ShieldActionDelegate {
     private func unblock() {
         store.shield.applicationCategories = nil
         store.shield.webDomainCategories   = nil
+        defaults.removeObject(forKey: EyeBreakKey.shieldAppliedAt)
     }
 }

@@ -22,10 +22,10 @@ struct EyeBreakApp: App {
         }
     }
 
+    /// 进前台时同步一次：包含跨天重置、Shield 超时兜底、以及待处理的触发标志
+    @MainActor
     private func checkAndShowBreakIfNeeded() {
-        if UserDefaults.eyeBreak.bool(forKey: EyeBreakKey.shouldShowEyeBreak) {
-            manager.showEyeBreak = true
-        }
+        manager.syncFromDefaults()
     }
 }
 

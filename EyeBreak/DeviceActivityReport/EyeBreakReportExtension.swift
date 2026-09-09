@@ -1,26 +1,27 @@
 // Layer 1 — DeviceActivityReport Extension
 //
-// 职责：读取 ActivitySegment.longestActivity（最长连续屏幕会话时长），
-// 写入 App Group UserDefaults，供主 App 和 Monitor 扩展用于决策。
+// 职责：读取 ActivitySegment 的 longestActivity / totalActivityDuration / dateInterval，
+// 以及 DeviceActivityData 的 lastUpdatedDate（v0.4 第七节 POC 1 明确要求观测数据更新延迟），
+// 全部写入 App Group 共享存储，供主 App 与 Monitor 扩展决策。
 //
-// ⚠️ 如果编译时出现 "type 'DeviceActivityResults' cannot conform to 'View'" 或
-//    "value of type '(ForEach...)' has no member 'deviceActivityResults'"，
-//    说明本版本 SDK 的 Environment Key 名称不同。
-//    请在 Xcode 中 Option+点击 `DeviceActivityReport` 查看实际的
-//    @Environment 或 @Query property wrapper。
-//    核心逻辑（DateComponents 转换、UserDefaults 写入、触发判断）不变，
-//    只需把数据源换成正确的属性即可。
+// ⚠️ 平台限制（重要）：
+//    DeviceActivityReport 是 SwiftUI View，只有主 App 前台显示它时扩展才会渲染。
+//    也就是说 longestActivity 只在用户打开 EyeBreak 时才刷新，
+//    用户在别的 App 里连续刷屏时这个值是不会更新的。
+//    因此 Layer 1 只作为「打开 App 时的校准/验证信号」，
+//    真正的后台触发依赖 Monitor 扩展的 Layer 2 递增阈值密度判定。
+//    正因为数据可能陈旧，写入时必须带时间戳，消费方一律做新鲜度校验。
+//
+// ⚠️ 若编译报错指向 @Environment(\.deviceActivityResults) 或 lastUpdatedDate，
+//    说明本版本 SDK 的属性名不同。在 Xcode 中 Option+点击 DeviceActivityReport
+//    查看实际属性名替换即可，下面的换算与写入逻辑不用动。
 
 import DeviceActivity
 import SwiftUI
 
-// MARK: - Context 标识符（与主 App 的 DeviceActivityReport(.eyeBreakActivity) 对应）
-
 extension DeviceActivityReport.Context {
     static let eyeBreakActivity = Self(rawValue: "com.eyebreak.report.activity")
 }
-
-// MARK: - 扩展入口
 
 @main
 struct EyeBreakReportScene: DeviceActivityReportScene {
@@ -28,8 +29,6 @@ struct EyeBreakReportScene: DeviceActivityReportScene {
         EyeBreakActivityReport(context: .eyeBreakActivity)
     }
 }
-
-// MARK: - Report Scene（系统根据 context 匹配并调用）
 
 struct EyeBreakActivityReport: DeviceActivityReportScene {
     let context: DeviceActivityReport.Context
@@ -39,75 +38,80 @@ struct EyeBreakActivityReport: DeviceActivityReportScene {
     }
 }
 
-// MARK: - 数据提取视图
-
 struct EyeBreakDataExtractorView: View {
 
-    // 系统通过此 Environment Key 将 DeviceActivityResults 注入视图。
-    // 类型：AsyncSequence，每个元素是 DeviceActivityData。
-    // 若编译失败，可能的替代属性名：
-    //   @Environment(\.deviceActivityData) var activityResults
-    //   @State var activityResults: DeviceActivityResults<DeviceActivityData>
     @Environment(\.deviceActivityResults) private var activityResults
 
-    private let defaults = UserDefaults(suiteName: EyeBreakConfig.appGroupID)!
+    private var defaults: UserDefaults { UserDefaults.eyeBreak }
 
     var body: some View {
         Color.clear
             .frame(width: 1, height: 1)
-            .task {
-                await extractAndPersist()
-            }
+            .task { await extractAndPersist() }
     }
 
-    // MARK: - DateComponents → TimeInterval
-
+    // DateComponents → 秒
     private func seconds(from components: DateComponents) -> TimeInterval {
-        let h = Double(components.hour   ?? 0) * 3600
-        let m = Double(components.minute ?? 0) * 60
-        let s = Double(components.second ?? 0)
-        return h + m + s
+        Double(components.hour ?? 0) * 3600
+            + Double(components.minute ?? 0) * 60
+            + Double(components.second ?? 0)
     }
-
-    // MARK: - 提取 longestActivity 并持久化
 
     private func extractAndPersist() async {
         var maxContinuousSeconds: TimeInterval = 0
         var totalSeconds: TimeInterval = 0
+        var segments = 0
+        var earliestStart: Date?
+        var latestEnd: Date?
+        var appleUpdatedAt: Date?
 
         for await data in activityResults {
-            // activitySegments 是普通 Array，不需要 await
+            // POC 1：系统最后一次更新该设备活动数据的时间
+            let updated = data.lastUpdatedDate
+            if appleUpdatedAt == nil || updated > appleUpdatedAt! {
+                appleUpdatedAt = updated
+            }
+
             for segment in data.activitySegments {
-                // totalActivityDuration 类型：DateComponents（需转换为秒）
+                segments += 1
+
+                // POC 1：片段对应的时间区间
+                let interval = segment.dateInterval
+                if earliestStart == nil || interval.start < earliestStart! {
+                    earliestStart = interval.start
+                }
+                if latestEnd == nil || interval.end > latestEnd! {
+                    latestEnd = interval.end
+                }
+
+                // totalActivityDuration 是 DateComponents，须换算成秒
                 totalSeconds += seconds(from: segment.totalActivityDuration)
 
-                // longestActivity 类型：DateInterval?（.duration 返回 TimeInterval 秒数）
+                // longestActivity 是 DateInterval?，.duration 直接给秒
                 if let longest = segment.longestActivity {
-                    if longest.duration > maxContinuousSeconds {
-                        maxContinuousSeconds = longest.duration
-                    }
+                    maxContinuousSeconds = max(maxContinuousSeconds, longest.duration)
                 }
             }
         }
 
-        // 写入共享存储（主 App 每 3 秒同步，Monitor 扩展每次被唤醒时读取）
+        defaults.eb_resetDailyStateIfNeeded()
+
         defaults.set(maxContinuousSeconds, forKey: EyeBreakKey.longestActivitySeconds)
-        defaults.set(totalSeconds,          forKey: EyeBreakKey.totalActivitySeconds)
-        defaults.set(Date(),                forKey: EyeBreakKey.longestActivityUpdatedAt)
+        defaults.set(totalSeconds,         forKey: EyeBreakKey.totalActivitySeconds)
+        defaults.set(segments,             forKey: EyeBreakKey.segmentCount)
+        defaults.set(Date(),               forKey: EyeBreakKey.longestActivityUpdatedAt)
+        if let appleUpdatedAt { defaults.set(appleUpdatedAt, forKey: EyeBreakKey.appleLastUpdatedDate) }
+        if let earliestStart  { defaults.set(earliestStart,  forKey: EyeBreakKey.segmentIntervalStart) }
+        if let latestEnd      { defaults.set(latestEnd,      forKey: EyeBreakKey.segmentIntervalEnd) }
 
-        // Layer 1 触发判断：30 分钟连续使用
-        let threshold: TimeInterval = 30 * 60
-        let inCooldown: Bool = {
-            guard let until = defaults.object(forKey: EyeBreakKey.cooldownUntil) as? Date
-            else { return false }
-            return Date() < until
-        }()
+        // Layer 1 触发判断，阈值从共享配置读取（与主 App / Monitor 完全一致）
+        let thresholdSeconds = Double(defaults.eb_targetMinutes * 60)
+        guard maxContinuousSeconds >= thresholdSeconds,
+              !defaults.eb_inCooldown,
+              !defaults.eb_alreadyTriggered
+        else { return }
 
-        if maxContinuousSeconds >= threshold,
-           !inCooldown,
-           !defaults.bool(forKey: EyeBreakKey.shouldShowEyeBreak) {
-            defaults.set(true,  forKey: EyeBreakKey.shouldShowEyeBreak)
-            defaults.set("1",   forKey: EyeBreakKey.activeLayer)
-        }
+        defaults.set(true, forKey: EyeBreakKey.shouldShowEyeBreak)
+        defaults.set("1",  forKey: EyeBreakKey.activeLayer)
     }
 }

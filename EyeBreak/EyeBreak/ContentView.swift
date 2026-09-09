@@ -19,14 +19,14 @@ struct ContentView: View {
             }
             .navigationTitle("EyeBreak POC")
             .listStyle(.insetGrouped)
-            .refreshable { /* pull to force UI sync */ }
+            .refreshable { manager.syncFromDefaults() }
         }
         .fullScreenCover(isPresented: $manager.showEyeBreak) {
             EyeExerciseView().environmentObject(manager)
         }
     }
 
-    // MARK: - Auth
+    // MARK: - 权限
 
     var authSection: some View {
         Section("权限") {
@@ -48,6 +48,7 @@ struct ContentView: View {
         default:        return "⏳ 未授权"
         }
     }
+
     var authColor: Color {
         switch manager.authStatus {
         case .approved: return .green
@@ -56,10 +57,10 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Monitoring controls
+    // MARK: - 监测控制
 
     var monitoringSection: some View {
-        Section("监测控制") {
+        Section {
             HStack {
                 Image(systemName: manager.isMonitoring ? "circle.fill" : "circle")
                     .foregroundStyle(manager.isMonitoring ? .green : .secondary)
@@ -72,9 +73,15 @@ struct ContentView: View {
                 }
             }
 
-            Stepper("测试窗口阈值: \(manager.debugWindowMinutes) 分钟",
-                    value: $manager.debugWindowMinutes, in: 1...30)
+            Stepper("目标连续用屏: \(manager.targetMinutes) 分钟",
+                    value: $manager.targetMinutes, in: 2...60)
                 .font(.subheadline)
+                .disabled(manager.isMonitoring)
+
+            Stepper("Layer 3 保底: \(manager.layer3Minutes) 分钟",
+                    value: $manager.layer3Minutes, in: 30...90, step: 5)
+                .font(.subheadline)
+                .disabled(manager.isMonitoring)
 
             HStack(spacing: 12) {
                 Button { manager.startMonitoring() } label: {
@@ -89,50 +96,59 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .disabled(!manager.isMonitoring)
             }
+        } header: {
+            Text("监测控制")
+        } footer: {
+            Text("真机 POC 阶段先设 2–5 分钟验证回调，通过后再改回 30 分钟做真实场景测试。启动后阈值锁定，需停止才能修改。")
+                .font(.caption2)
         }
     }
 
-    // MARK: - Layer 1: longestActivity
+    // MARK: - Layer 1
 
     var layer1Section: some View {
         Section {
+            row("longestActivity",
+                String(format: "%.1f 分钟", manager.longestActivityMinutes),
+                highlight: manager.longestActivityMinutes >= Double(manager.targetMinutes))
+
             HStack {
-                Text("longestActivity")
-                    .font(.system(.subheadline, design: .monospaced))
+                Text("数据新鲜度").font(.system(.subheadline, design: .monospaced))
                 Spacer()
-                Text(String(format: "%.1f 分钟", manager.longestActivityMinutes))
-                    .foregroundStyle(manager.longestActivityMinutes >= 30 ? .red : .primary)
-                    .monospacedDigit()
-            }
-            HStack {
-                Text("数据更新时间")
-                    .font(.system(.subheadline, design: .monospaced))
-                Spacer()
-                if let t = manager.layer1UpdatedAt {
-                    Text(t, style: .relative).font(.caption).foregroundStyle(.secondary)
-                    Text("前").font(.caption).foregroundStyle(.secondary)
+                if let t = manager.layer1WrittenAt {
+                    Text(manager.layer1IsFresh ? "✅ 新鲜" : "⚠️ 已过期")
+                        .font(.caption)
+                        .foregroundStyle(manager.layer1IsFresh ? .green : .orange)
+                    Text(t, style: .relative).font(.caption2).foregroundStyle(.secondary)
                 } else {
                     Text("尚未获取").font(.caption).foregroundStyle(.secondary)
                 }
             }
-            // Embed the DeviceActivityReport view — this triggers the extension
-            // to read DeviceActivityData and write longestActivity to UserDefaults
-            reportView
-                .frame(height: 1)
-                .clipped()
+
+            HStack {
+                Text("lastUpdatedDate").font(.system(.subheadline, design: .monospaced))
+                Spacer()
+                if let t = manager.appleLastUpdatedDate {
+                    Text(t, style: .relative).font(.caption).foregroundStyle(.secondary)
+                    Text("前").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("—").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            row("activitySegments", "\(manager.segmentCount) 段")
+
+            reportView.frame(height: 1).clipped()
         } header: {
             Text("Layer 1 — longestActivity（最优先）")
         } footer: {
-            Text("由 DeviceActivityReport 扩展实时读取，数据越新鲜越可靠。若此值 ≥ 30分钟则直接触发。")
+            Text("由 DeviceActivityReport 扩展读取。注意：该扩展只在本 App 前台显示时才渲染，因此数据仅在打开 App 时刷新。过期数据一律不采信，避免昨日的长会话造成误触发。")
                 .font(.caption2)
         }
     }
 
     @ViewBuilder
     var reportView: some View {
-        // DeviceActivityReport view: the system routes rendering to our
-        // DeviceActivityReport extension which reads longestActivity and
-        // writes to shared UserDefaults (which syncFromDefaults() picks up).
         DeviceActivityReport(
             .eyeBreakActivity,
             filter: DeviceActivityFilter(
@@ -146,53 +162,52 @@ struct ContentView: View {
         )
     }
 
-    // MARK: - Layer 2: consecutive windows
+    // MARK: - Layer 2
 
     var layer2Section: some View {
         Section {
+            row("最近里程碑", "\(manager.lastMilestoneMinutes) 分钟用量")
+
             HStack {
-                Text("连续活跃窗口")
-                    .font(.system(.subheadline, design: .monospaced))
+                Text("使用密度").font(.system(.subheadline, design: .monospaced))
                 Spacer()
-                Text("\(manager.consecutiveWindows) / \(manager.windowsNeeded)")
+                Text(manager.observedDensity > 0
+                     ? String(format: "%.2f", manager.observedDensity)
+                     : "—")
                     .monospacedDigit()
-                    .foregroundStyle(manager.consecutiveWindows >= manager.windowsNeeded ? .red : .primary)
+                    .foregroundStyle(manager.observedDensity >= 1 / EyeBreakConfig.densityTolerance
+                                     ? .red : .primary)
             }
-            // Visual progress bar
+
             ProgressView(
-                value: Double(min(manager.consecutiveWindows, manager.windowsNeeded)),
-                total: Double(manager.windowsNeeded)
+                value: min(manager.observedDensity, 1.0),
+                total: 1.0
             )
-            .tint(manager.consecutiveWindows >= manager.windowsNeeded ? .red : .teal)
+            .tint(manager.observedDensity >= 1 / EyeBreakConfig.densityTolerance ? .red : .teal)
         } header: {
-            Text("Layer 2 — 短窗口连续计数（备选）")
+            Text("Layer 2 — 使用密度（主力）")
         } footer: {
-            Text("每 5 分钟窗口内有 ≥ \(EyeBreakConfig.activityThresholdMinutes) 分钟活动则计 1。连续 \(EyeBreakConfig.consecutiveWindowsNeeded) 个窗口 ≈ 30 分钟持续使用。")
+            Text("阈值事件在一个监测区间内只触发一次，无法反复计窗口。改用一排递增阈值（每 \(EyeBreakConfig.step(for: manager.targetMinutes)) 分钟用量一个），以相邻回调的真实时钟间隔算密度：\(EyeBreakConfig.continuityUsageSpan(for: manager.targetMinutes)) 分钟用量若在 \(EyeBreakConfig.continuityWallLimit(for: manager.targetMinutes)) 分钟内跑完即判为连续。密度 1.0 = 全程在用；中途休息超过 \(EyeBreakConfig.restGapMinutes) 分钟则连续链清零。")
                 .font(.caption2)
         }
     }
 
-    // MARK: - Layer 3: daily total
+    // MARK: - Layer 3
 
     var layer3Section: some View {
         Section {
-            HStack {
-                Text("今日总活跃时间")
-                    .font(.system(.subheadline, design: .monospaced))
-                Spacer()
-                Text(String(format: "%.1f 分钟", manager.totalActivityMinutes))
-                    .monospacedDigit()
-                    .foregroundStyle(manager.totalActivityMinutes >= 30 ? .orange : .primary)
-            }
+            row("今日总活跃时间",
+                String(format: "%.1f 分钟", manager.totalActivityMinutes),
+                highlight: manager.totalActivityMinutes >= Double(manager.layer3Minutes))
         } header: {
             Text("Layer 3 — 日总量（保底）")
         } footer: {
-            Text("当日总屏幕活动 ≥ 30 分钟触发，仅当 Layer 1/2 均未触发时生效。对重度用户有效。")
+            Text("当日累计用量达到 \(manager.layer3Minutes) 分钟且 Layer 1/2 均未触发时，给一次柔性提醒；之后每再累积 \(manager.layer3Minutes) 分钟才会再提醒一次。对应 v0.4 第五节 C 级的 45–60 分钟节奏。")
                 .font(.caption2)
         }
     }
 
-    // MARK: - Debug actions
+    // MARK: - 调试
 
     var actionsSection: some View {
         Section("调试工具") {
@@ -204,8 +219,10 @@ struct ContentView: View {
 
             Button(role: .destructive) {
                 manager.unshield()
-                UserDefaults.eyeBreak.set(false, forKey: EyeBreakKey.shouldShowEyeBreak)
-                UserDefaults.eyeBreak.set("",    forKey: EyeBreakKey.activeLayer)
+                let db = UserDefaults.eyeBreak
+                db.set(false, forKey: EyeBreakKey.shouldShowEyeBreak)
+                db.set("",    forKey: EyeBreakKey.activeLayer)
+                manager.addLog("已强制解除 Shield")
             } label: {
                 Label("强制解除 Shield", systemImage: "lock.open.fill")
             }
@@ -219,23 +236,34 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Log
+    // MARK: - 日志
 
     var logSection: some View {
         Section("日志") {
             if manager.log.isEmpty {
                 Text("暂无日志").foregroundStyle(.secondary).font(.caption)
             } else {
-                ForEach(manager.log.reversed().prefix(30), id: \.self) { entry in
-                    Text(entry)
-                        .font(.system(.caption2, design: .monospaced))
+                ForEach(Array(manager.log.reversed().prefix(30).enumerated()), id: \.offset) { _, entry in
+                    Text(entry).font(.system(.caption2, design: .monospaced))
                 }
             }
         }
     }
+
+    // MARK: - 小工具
+
+    private func row(_ label: String, _ value: String, highlight: Bool = false) -> some View {
+        HStack {
+            Text(label).font(.system(.subheadline, design: .monospaced))
+            Spacer()
+            Text(value)
+                .monospacedDigit()
+                .foregroundStyle(highlight ? .red : .primary)
+        }
+    }
 }
 
-// MARK: - DeviceActivityReport context extension (main app)
+// MARK: - Report context（主 App 侧）
 
 extension DeviceActivityReport.Context {
     static let eyeBreakActivity = Self(rawValue: "com.eyebreak.report.activity")
