@@ -120,20 +120,44 @@ jobs:
           exit $fail
 
       # P1-7：检测算法是纯函数，可离线单测，不依赖真机或 Family Controls。
+      #
+      # 注意两点，都是踩过的坑：
+      #   1. 必须 set -o pipefail。否则 `xcodebuild | xcbeautify` 的退出码取自
+      #      xcbeautify，xcodebuild 失败也会被判成功，步骤绿而测试没跑。
+      #   2. 模拟器名称随镜像变化，写死 name 会找不到设备，所以按 UDID 动态选取。
+      #   最后再断言「确实执行了 ≥1 个测试」，防止空跑被当成通过。
       - name: Run unit tests
         working-directory: EyeBreak
         run: |
+          set -euo pipefail
+
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)['devices']
+          for runtime, devs in data.items():
+              if 'iOS' not in runtime:
+                  continue
+              for dev in devs:
+                  if dev.get('isAvailable') and 'iPhone' in dev['name']:
+                      print(dev['udid'])
+                      raise SystemExit
+          raise SystemExit('no available iPhone simulator')
+          ")
+          test -n "$UDID" || { echo "::error::no available iPhone simulator"; exit 1; }
+          echo "simulator udid: $UDID"
+
           xcodebuild test \
             -project EyeBreak.xcodeproj \
             -scheme EyeBreakTests \
-            -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+            -destination "platform=iOS Simulator,id=$UDID" \
             CODE_SIGNING_ALLOWED=NO \
-            | xcbeautify --renderer github-actions || \
-          xcodebuild test \
-            -project EyeBreak.xcodeproj \
-            -scheme EyeBreakTests \
-            -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
-            CODE_SIGNING_ALLOWED=NO
+            2>&1 | tee test-output.txt
+
+          if ! grep -qE "Executed [1-9][0-9]* test" test-output.txt; then
+            echo "::error::unit tests reported success but executed no tests"
+            exit 1
+          fi
+          grep -E "Executed [0-9]+ test" test-output.txt | tail -2
 
       - name: Build (compile check — signing disabled)
         working-directory: EyeBreak
