@@ -39,6 +39,12 @@ struct ContentView: View {
             if manager.authStatus != .approved {
                 Button("申请授权") { Task { await manager.requestAuthorization() } }
             }
+            // 授权被拒或启动失败时给出可执行的恢复说明，而不是静默失败
+            if let msg = manager.statusMessage {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
         }
     }
 
@@ -228,7 +234,7 @@ struct ContentView: View {
     // MARK: - 调试
 
     var actionsSection: some View {
-        Section("调试工具") {
+        Section {
             Button {
                 manager.manualTrigger()
             } label: {
@@ -236,21 +242,32 @@ struct ContentView: View {
             }
 
             Button(role: .destructive) {
-                manager.unshield()
-                let db = UserDefaults.eyeBreak
-                db.set(false, forKey: EyeBreakKey.shouldShowEyeBreak)
-                db.set("",    forKey: EyeBreakKey.activeLayer)
-                manager.addLog("已强制解除 Shield")
+                manager.emergencyRelease()
             } label: {
                 Label("强制解除 Shield", systemImage: "lock.open.fill")
             }
 
+            // 完成 / 跳过 / 稍后必须分开，合并统计会让习惯数据失真
             HStack {
-                Label("今日护眼次数", systemImage: "checkmark.seal.fill")
+                Label("今日完成", systemImage: "checkmark.seal.fill")
                 Spacer()
-                Text("\(UserDefaults.eyeBreak.integer(forKey: EyeBreakKey.eyeBreakCount))")
-                    .monospacedDigit()
+                Text("\(manager.completedCount)").monospacedDigit()
             }
+            HStack {
+                Label("今日跳过", systemImage: "forward.end.fill")
+                Spacer()
+                Text("\(manager.skippedCount)").monospacedDigit().foregroundStyle(.secondary)
+            }
+            HStack {
+                Label("今日稍后", systemImage: "clock.arrow.circlepath")
+                Spacer()
+                Text("\(manager.snoozedCount)").monospacedDigit().foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("调试工具")
+        } footer: {
+            Text("「强制解除」是 Shield 卡住时的手动恢复入口。系统层面另有到期看门狗与通知内的「立即解除遮罩」两条自动通道。")
+                .font(.caption2)
         }
     }
 

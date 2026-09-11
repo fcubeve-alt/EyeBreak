@@ -19,9 +19,13 @@ struct EyeExerciseView: View {
         Exercise(id: 3, title: "近远焦点切换", detail: "看手指 → 看远处，交替 5 次",        icon: "scope",           seconds: 25),
     ]
 
-    // Resolved when the user adds eye_exercise.mp4 to the Xcode project (EyeBreak target)
     private var videoURL: URL? {
         Bundle.main.url(forResource: "eye_exercise", withExtension: "mp4")
+    }
+
+    /// 文案按真实阈值与触发层级生成，不写死「30 分钟」
+    private var subtitle: String {
+        UserDefaults.eyeBreak.eb_triggerSubtitle
     }
 
     var body: some View {
@@ -38,7 +42,7 @@ struct EyeExerciseView: View {
                     VideoExerciseView(
                         url: url,
                         onComplete: { phase = .done },
-                        onSkip: { manager.completeEyeBreak() }
+                        onSkip: { manager.finishEyeBreak(.skipped) }
                     )
                 } else {
                     Color.black.ignoresSafeArea().onAppear { phase = .exercise(0) }
@@ -50,7 +54,7 @@ struct EyeExerciseView: View {
                         if idx + 1 < exercises.count { phase = .exercise(idx + 1) }
                         else { phase = .done }
                     },
-                    onSkip: { manager.completeEyeBreak() }
+                    onSkip: { manager.finishEyeBreak(.skipped) }
                 )
                 .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
             case .done:
@@ -61,87 +65,94 @@ struct EyeExerciseView: View {
     }
 
     // MARK: - Prompt
+    //
+    // 整页可滚动：小屏、横屏或最大字号下，底部的「稍后再说」必须仍然够得到，
+    // 否则用户会被一个无法退出的全屏页困住。
 
     var promptView: some View {
-        VStack(spacing: 0) {
-            Spacer()
+        ScrollView {
+            VStack(spacing: 24) {
+                VStack(spacing: 16) {
+                    Image(systemName: "eye.circle.fill")
+                        .font(.system(size: 72))
+                        .foregroundStyle(.white)
+                        .shadow(radius: 8)
+                        .accessibilityHidden(true)
 
-            VStack(spacing: 16) {
-                Image(systemName: "eye.circle.fill")
-                    .font(.system(size: 72))
-                    .foregroundStyle(.white)
-                    .shadow(radius: 8)
+                    Text("眼睛需要休息了")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
 
-                Text("眼睛需要休息了")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundStyle(.white)
+                    Text(subtitle)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+                .padding(.top, 40)
 
-                Text("您已持续使用屏幕约30分钟\n让眼睛休息一下吧 ✨")
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.white.opacity(0.85))
-            }
-            .padding(.bottom, 40)
-
-            Spacer()
-
-            VStack(spacing: 12) {
-                // Video option — shown only when eye_exercise.mp4 is in the bundle
-                if videoURL != nil {
-                    Button { phase = .video } label: {
-                        HStack(spacing: 14) {
-                            Image(systemName: "play.circle.fill")
-                                .font(.title2)
-                                .frame(width: 36)
-                                .foregroundStyle(.white)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("播放护眼视频")
-                                    .fontWeight(.bold)
+                VStack(spacing: 12) {
+                    if videoURL != nil {
+                        Button { phase = .video } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.title2)
+                                    .frame(width: 36)
                                     .foregroundStyle(.white)
-                                Text("跟随视频做护眼操")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("播放护眼视频")
+                                        .fontWeight(.bold)
+                                        .foregroundStyle(.white)
+                                    Text("跟随视频做护眼操")
+                                        .font(.caption)
+                                        .foregroundStyle(.white.opacity(0.75))
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
                                     .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.75))
+                                    .foregroundStyle(.white.opacity(0.6))
                             }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.6))
+                            .padding()
+                            .background(Color.white.opacity(0.28))
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color.white.opacity(0.6), lineWidth: 1)
+                            )
                         }
-                        .padding()
-                        .background(Color.white.opacity(0.28))
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .stroke(Color.white.opacity(0.6), lineWidth: 1)
-                        )
+                        .accessibilityLabel("播放护眼视频，跟随视频做护眼操")
+
+                        Text("— 或选择以下动作 —")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.5))
+                            .padding(.top, 4)
+                    } else {
+                        Text("选一个护眼动作")
+                            .font(.footnote)
+                            .foregroundStyle(.white.opacity(0.7))
+                            .textCase(.uppercase)
+                            .tracking(1)
                     }
 
-                    Text("— 或选择以下动作 —")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.5))
-                        .padding(.top, 4)
-                } else {
-                    Text("选一个护眼动作")
-                        .font(.footnote)
-                        .foregroundStyle(.white.opacity(0.7))
-                        .textCase(.uppercase)
-                        .tracking(1)
-                }
-
-                ForEach(exercises) { ex in
-                    Button { phase = .exercise(ex.id) } label: {
-                        ExerciseRow(exercise: ex)
+                    ForEach(exercises) { ex in
+                        Button { phase = .exercise(ex.id) } label: {
+                            ExerciseRow(exercise: ex)
+                        }
+                        .accessibilityLabel("\(ex.title)，\(ex.seconds) 秒，\(ex.detail)")
                     }
-                }
 
-                Button(action: { manager.dismissEyeBreak() }) {
-                    Text("稍后再说")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.6))
-                        .padding(.vertical, 12)
+                    Button(action: { manager.finishEyeBreak(.snoozed) }) {
+                        Text("稍后再说")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.75))
+                            .padding(.vertical, 12)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .accessibilityHint("关闭本次提醒并进入冷却期")
                 }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 40)
             }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 48)
+            .frame(maxWidth: .infinity)
         }
     }
 
@@ -152,6 +163,7 @@ struct EyeExerciseView: View {
             Image(systemName: "checkmark.seal.fill")
                 .font(.system(size: 80))
                 .foregroundStyle(.white)
+                .accessibilityHidden(true)
 
             Text("眼睛充好电了！")
                 .font(.title)
@@ -161,7 +173,7 @@ struct EyeExerciseView: View {
             Text("继续加油 💪")
                 .foregroundStyle(.white.opacity(0.8))
 
-            Button(action: { manager.completeEyeBreak() }) {
+            Button(action: { manager.finishEyeBreak(.completed) }) {
                 Text("回到 App")
                     .fontWeight(.semibold)
                     .foregroundStyle(Color.teal)
@@ -171,6 +183,7 @@ struct EyeExerciseView: View {
                     .clipShape(Capsule())
             }
         }
+        .padding(24)
     }
 
     var background: LinearGradient {
@@ -182,7 +195,7 @@ struct EyeExerciseView: View {
     }
 }
 
-// MARK: - Video player screen
+// MARK: - 视频播放
 
 struct VideoExerciseView: View {
     let url: URL
@@ -218,19 +231,18 @@ struct VideoExerciseView: View {
             }
             .padding(.top, 60)
             .padding(.trailing, 20)
+            .accessibilityLabel("跳过护眼视频")
         }
         .onAppear {
             let p = AVPlayer(url: url)
             player = p
             p.play()
         }
-        .onDisappear {
-            player?.pause()
-        }
+        .onDisappear { player?.pause() }
     }
 }
 
-// MARK: - Exercise row
+// MARK: - 动作条目
 
 struct ExerciseRow: View {
     let exercise: Exercise
@@ -254,7 +266,7 @@ struct ExerciseRow: View {
     }
 }
 
-// MARK: - Active exercise screen
+// MARK: - 动作进行页
 
 struct ExerciseActiveView: View {
     let exercise: Exercise
@@ -262,6 +274,7 @@ struct ExerciseActiveView: View {
     let onSkip: () -> Void
 
     @State private var remaining: Int
+    @State private var endDate: Date = .distantFuture
     @State private var timer: Timer?
 
     init(exercise: Exercise, onComplete: @escaping () -> Void, onSkip: @escaping () -> Void) {
@@ -271,72 +284,90 @@ struct ExerciseActiveView: View {
         _remaining = State(initialValue: exercise.seconds)
     }
 
-    var progress: Double { 1 - Double(remaining) / Double(exercise.seconds) }
-
-    var body: some View {
-        VStack(spacing: 32) {
-            Spacer()
-
-            Image(systemName: exercise.icon)
-                .font(.system(size: 80))
-                .foregroundStyle(.white)
-                .symbolEffect(.pulse)
-
-            Text(exercise.title)
-                .font(.title2).fontWeight(.semibold)
-                .foregroundStyle(.white)
-
-            Text(exercise.detail)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.white.opacity(0.85))
-                .padding(.horizontal, 32)
-
-            ZStack {
-                Circle()
-                    .stroke(.white.opacity(0.2), lineWidth: 10)
-                Circle()
-                    .trim(from: 0, to: progress)
-                    .stroke(.white, style: StrokeStyle(lineWidth: 10, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .animation(.linear(duration: 1), value: remaining)
-                Text("\(remaining)")
-                    .font(.system(size: 40, weight: .bold))
-                    .monospacedDigit()
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 120, height: 120)
-
-            Spacer()
-
-            VStack(spacing: 12) {
-                Button(action: { timer?.invalidate(); onComplete() }) {
-                    Text("完成 ✓")
-                        .fontWeight(.semibold)
-                        .foregroundStyle(Color(red: 0.08, green: 0.45, blue: 0.55))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                }
-
-                Button(action: { timer?.invalidate(); onSkip() }) {
-                    Text("跳过全部，返回 App")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.55))
-                }
-            }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 48)
-        }
-        .onAppear { startTimer() }
-        .onDisappear { timer?.invalidate() }
+    var progress: Double {
+        1 - Double(remaining) / Double(exercise.seconds)
     }
 
-    private func startTimer() {
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { t in
-            if remaining > 0 { remaining -= 1 }
-            else { t.invalidate(); onComplete() }
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 28) {
+                Image(systemName: exercise.icon)
+                    .font(.system(size: 80))
+                    .foregroundStyle(.white)
+                    .symbolEffect(.pulse)
+                    .accessibilityHidden(true)
+                    .padding(.top, 40)
+
+                Text(exercise.title)
+                    .font(.title2).fontWeight(.semibold)
+                    .foregroundStyle(.white)
+
+                Text(exercise.detail)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.horizontal, 32)
+
+                ZStack {
+                    Circle()
+                        .stroke(.white.opacity(0.2), lineWidth: 10)
+                    Circle()
+                        .trim(from: 0, to: progress)
+                        .stroke(.white, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .animation(.linear(duration: 1), value: remaining)
+                    Text("\(remaining)")
+                        .font(.system(size: 40, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 120, height: 120)
+                .accessibilityLabel("剩余 \(remaining) 秒")
+
+                VStack(spacing: 12) {
+                    Button(action: { stop(); onComplete() }) {
+                        Text("完成 ✓")
+                            .fontWeight(.semibold)
+                            .foregroundStyle(Color(red: 0.08, green: 0.45, blue: 0.55))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                    }
+
+                    Button(action: { stop(); onSkip() }) {
+                        Text("跳过全部，返回 App")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.75))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                    }
+                }
+                .padding(.horizontal, 32)
+                .padding(.bottom, 40)
+            }
+            .frame(maxWidth: .infinity)
         }
+        .onAppear { start() }
+        .onDisappear { stop() }
+    }
+
+    // 倒计时以结束时刻为准，而不是累计 tick 次数。
+    // 这样既不会多走一秒，切到后台再回来也不会漂移。
+    private func start() {
+        endDate = Date().addingTimeInterval(Double(exercise.seconds))
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            let left = max(0, Int(endDate.timeIntervalSinceNow.rounded(.up)))
+            if left != remaining { remaining = left }
+            if left == 0 {
+                stop()
+                onComplete()
+            }
+        }
+    }
+
+    private func stop() {
+        timer?.invalidate()
+        timer = nil
     }
 }
 

@@ -81,8 +81,52 @@ enum EyeBreakKey {
     static let shouldShowEyeBreak = "eyebreak.shouldShowEyeBreak"
     static let cooldownUntil      = "eyebreak.cooldownUntil"
     static let shieldAppliedAt    = "eyebreak.shieldAppliedAt"
-    static let eyeBreakCount      = "eyebreak.eyeBreakCount"
     static let dayStamp           = "eyebreak.dayStamp"
+
+    // 监测状态（持久化，避免 App 重启后界面与系统实际注册状态不一致）
+    static let monitoringIntended = "eyebreak.monitoringIntended"
+
+    // 结果计数：完成 / 跳过 / 稍后，三者必须分开，否则习惯统计没有可信度
+    static let completedCount = "eyebreak.completedCount"
+    static let skippedCount   = "eyebreak.skippedCount"
+    static let snoozedCount   = "eyebreak.snoozedCount"
+}
+
+// MARK: - 用户可见文案
+//
+// 阈值可由用户在 2–60 分钟之间调整，所以任何「约 30 分钟」之类的写死文案都会
+// 和事实不符。Shield 扩展与护眼页一律通过这里按实际阈值生成文案。
+
+enum EyeBreakCopy {
+    static func subtitle(layer: String, targetMinutes: Int, layer3Minutes: Int) -> String {
+        switch layer {
+        case "3":
+            return "今天累计用屏已超过 \(layer3Minutes) 分钟\n抽 20 秒放松一下眼睛 💚"
+        default:
+            return "您已持续使用屏幕约 \(targetMinutes) 分钟\n让眼睛休息一下吧 ✨"
+        }
+    }
+
+    static func notificationBody(layer: String, targetMinutes: Int, layer3Minutes: Int) -> String {
+        switch layer {
+        case "3":
+            return "今天累计用屏已超过 \(layer3Minutes) 分钟，抽 20 秒放松一下眼睛。"
+        default:
+            return "您已持续使用屏幕约 \(targetMinutes) 分钟，请做一下护眼动作。"
+        }
+    }
+}
+
+// MARK: - 通知标识符（主 App 与 Monitor 扩展共用）
+
+enum EyeBreakNotification {
+    static let category      = "EYEBREAK"
+    static let actionExercise = "EYEBREAK_EXERCISE"
+    static let actionDismiss  = "EYEBREAK_DISMISS"
+    /// 紧急解除：非前台动作，系统会在后台唤起主 App 执行解除，
+    /// 是 Shield 卡住时不依赖用户手动打开 App 的恢复通道。
+    static let actionRelease  = "EYEBREAK_RELEASE_SHIELD"
+    static let categoryRecovery = "EYEBREAK_RECOVERY"
 }
 
 // MARK: - 共享 UserDefaults 与通用判断
@@ -121,13 +165,32 @@ extension UserDefaults {
         return Date().timeIntervalSince(t) > Double(EyeBreakConfig.shieldMaxMinutes * 60)
     }
 
+    /// 当前触发层级（"1"/"2"/"3"/""）
+    var eb_activeLayer: String { string(forKey: EyeBreakKey.activeLayer) ?? "" }
+
+    /// 按真实阈值与触发层级生成的用户可见文案
+    var eb_triggerSubtitle: String {
+        EyeBreakCopy.subtitle(layer: eb_activeLayer,
+                              targetMinutes: eb_targetMinutes,
+                              layer3Minutes: eb_layer3Minutes)
+    }
+
     /// 跨天时清空检测状态与当日计数
     func eb_resetDailyStateIfNeeded() {
         let today = Self.eb_dayString(Date())
         guard string(forKey: EyeBreakKey.dayStamp) != today else { return }
         set(today, forKey: EyeBreakKey.dayStamp)
         eb_resetDetectionState()
-        set(0, forKey: EyeBreakKey.eyeBreakCount)
+        set(0, forKey: EyeBreakKey.completedCount)
+        set(0, forKey: EyeBreakKey.skippedCount)
+        set(0, forKey: EyeBreakKey.snoozedCount)
+    }
+
+    /// 清除触发标志与 Shield 时间戳。调用方负责实际清空 ManagedSettingsStore。
+    func eb_clearTriggerState() {
+        set(false, forKey: EyeBreakKey.shouldShowEyeBreak)
+        set("",    forKey: EyeBreakKey.activeLayer)
+        removeObject(forKey: EyeBreakKey.shieldAppliedAt)
     }
 
     func eb_resetDetectionState() {

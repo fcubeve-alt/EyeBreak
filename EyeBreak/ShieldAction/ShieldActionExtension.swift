@@ -1,4 +1,6 @@
 import ManagedSettings
+import DeviceActivity
+import UserNotifications
 import Foundation
 
 class ShieldActionExtension: ShieldActionDelegate {
@@ -24,39 +26,69 @@ class ShieldActionExtension: ShieldActionDelegate {
         handleAction(action, completionHandler: completionHandler)
     }
 
-    // MARK: - Shared handler
+    // MARK: - 统一处理
 
     private func handleAction(_ action: ShieldAction,
                               completionHandler: @escaping (ShieldActionResponse) -> Void) {
         switch action {
 
         case .primaryButtonPressed:
-            // 用户点"做护眼动作"：解除 Shield，让用户能切换到 EyeBreak 主 App。
-            // 不覆盖 activeLayer——保留真正触发的那一层，否则 POC 记录会失真。
+            // iOS 不允许 ShieldAction 扩展直接启动主 App，
+            // 因此解除遮罩后立刻推一条带前台动作的通知，
+            // 让用户一次点击就能进入护眼动作，而不是自己去找 App。
             defaults.set(true, forKey: EyeBreakKey.shouldShowEyeBreak)
             unblock()
+            postOpenAppNotification()
             completionHandler(.close)
 
         case .secondaryButtonPressed:
-            // 用户点"稍后再说"：解除 Shield，设冷却期，清空连续链
-            let cooldown = Date().addingTimeInterval(Double(EyeBreakConfig.cooldownMinutes * 60))
-            defaults.set(cooldown, forKey: EyeBreakKey.cooldownUntil)
-            defaults.removeObject(forKey: EyeBreakKey.milestoneHits)
-            defaults.set(false, forKey: EyeBreakKey.shouldShowEyeBreak)
-            defaults.set("",    forKey: EyeBreakKey.activeLayer)
-            unblock()
+            snooze()
             completionHandler(.close)
 
-        // 二级菜单项等其余动作一律按「稍后」处理：解除遮罩、放用户回去
+        // 二级菜单项等其余动作按「稍后」处理
         default:
-            unblock()
+            snooze()
             completionHandler(.close)
         }
+    }
+
+    private func snooze() {
+        let cooldown = Date().addingTimeInterval(Double(EyeBreakConfig.cooldownMinutes * 60))
+        defaults.set(cooldown, forKey: EyeBreakKey.cooldownUntil)
+        defaults.removeObject(forKey: EyeBreakKey.milestoneHits)
+        let count = defaults.integer(forKey: EyeBreakKey.snoozedCount) + 1
+        defaults.set(count, forKey: EyeBreakKey.snoozedCount)
+        defaults.eb_clearTriggerState()
+        unblock()
+    }
+
+    private func postOpenAppNotification() {
+        let content = UNMutableNotificationContent()
+        content.title = "护眼动作准备好了"
+        content.body  = "点此进入 EyeBreak，跟着做 20 秒。"
+        content.sound = .default
+        content.categoryIdentifier = EyeBreakNotification.category
+
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: "eyebreak-open-\(Int(Date().timeIntervalSince1970))",
+                                  content: content,
+                                  trigger: nil),
+            withCompletionHandler: nil
+        )
     }
 
     private func unblock() {
         store.shield.applicationCategories = nil
         store.shield.webDomainCategories   = nil
         defaults.removeObject(forKey: EyeBreakKey.shieldAppliedAt)
+        DeviceActivityCenter().stopMonitoring([.shieldWatchdog])
+        UNUserNotificationCenter.current()
+            .removePendingNotificationRequests(withIdentifiers: ["eyebreak-recovery"])
     }
+}
+
+// MARK: - 看门狗活动名（与 Monitor 扩展一致）
+
+extension DeviceActivityName {
+    static let shieldWatchdog = DeviceActivityName("com.eyebreak.monitor.shieldWatchdog")
 }

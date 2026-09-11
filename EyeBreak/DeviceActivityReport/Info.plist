@@ -20,12 +20,14 @@
     <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <!-- 本扩展入口由 EyeBreakReportExtension 上的 @main 生成（SwiftUI 形态），
+         不使用 NSExtensionPrincipalClass。此前残留的
+         $(PRODUCT_MODULE_NAME).EyeBreakReportScene 指向一个已被重命名掉的类型，
+         Xcode 不校验该字符串，因而编译通过但扩展在运行时加载失败。 -->
     <key>NSExtension</key>
     <dict>
         <key>NSExtensionPointIdentifier</key>
         <string>com.apple.deviceactivity.report</string>
-        <key>NSExtensionPrincipalClass</key>
-        <string>$(PRODUCT_MODULE_NAME).EyeBreakReportScene</string>
     </dict>
 </dict>
 </plist>

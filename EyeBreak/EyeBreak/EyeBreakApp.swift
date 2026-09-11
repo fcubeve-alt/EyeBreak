@@ -17,19 +17,21 @@ struct EyeBreakApp: App {
                     if ProcessInfo.processInfo.arguments.contains("-EyeBreakDemo") {
                         manager.showEyeBreak = true
                     } else {
-                        checkAndShowBreakIfNeeded()
+                        enterForeground()
                     }
                 }
                 .onReceive(NotificationCenter.default.publisher(
                     for: UIApplication.willEnterForegroundNotification)) { _ in
-                    checkAndShowBreakIfNeeded()
+                    enterForeground()
                 }
         }
     }
 
-    /// 进前台时同步一次：包含跨天重置、Shield 超时兜底、以及待处理的触发标志
+    /// 进前台时同步一次：跨天重置、Shield 超时兜底、与系统核对监测状态、
+    /// 以及处理待显示的触发标志。
     @MainActor
-    private func checkAndShowBreakIfNeeded() {
+    private func enterForeground() {
+        manager.reconcileMonitoringState()
         manager.syncFromDefaults()
     }
 }
@@ -47,45 +49,93 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         return true
     }
 
-    // 前台收到通知时直接弹护眼界面（不显示横幅）
+    // 前台收到提醒时直接展示全屏护眼页，不再叠一层横幅
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        if notification.request.content.categoryIdentifier == "EYEBREAK" {
-            Task { @MainActor in manager?.showEyeBreak = true }
-            completionHandler([])  // 不额外弹横幅，直接展示全屏界面
-        } else {
+        switch notification.request.content.categoryIdentifier {
+        case EyeBreakNotification.category:
+            Task { @MainActor in self.manager?.showEyeBreak = true }
+            completionHandler([])
+        case EyeBreakNotification.categoryRecovery:
+            // 已经在前台，说明 App 可运行，直接静默兜底解除
+            Task { @MainActor in self.manager?.releaseShieldIfStale() }
+            completionHandler([])
+        default:
             completionHandler([.banner, .sound])
         }
     }
 
-    // 用户点击通知
+    // 用户对通知采取动作。必须按 actionIdentifier 分流，
+    // 否则「稍后再说」会和「做护眼动作」走同一条路径。
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
-        if response.notification.request.content.categoryIdentifier == "EYEBREAK" {
-            Task { @MainActor in manager?.showEyeBreak = true }
+        let action = response.actionIdentifier
+        let category = response.notification.request.content.categoryIdentifier
+
+        Task { @MainActor in
+            guard let manager = self.manager else { return }
+
+            switch action {
+            case EyeBreakNotification.actionDismiss:
+                // 稍后：设冷却、清理待显示状态、解除遮罩，且不打开护眼页
+                manager.finishEyeBreak(.snoozed)
+
+            case EyeBreakNotification.actionRelease:
+                manager.emergencyRelease()
+
+            case EyeBreakNotification.actionExercise:
+                manager.showEyeBreak = true
+
+            case UNNotificationDefaultActionIdentifier:
+                // 点通知主体：提醒类打开护眼页，恢复类执行兜底解除
+                if category == EyeBreakNotification.categoryRecovery {
+                    manager.releaseShieldIfStale()
+                } else {
+                    manager.showEyeBreak = true
+                }
+
+            default:
+                break   // 包含 UNNotificationDismissActionIdentifier：划掉通知不做任何事
+            }
+            completionHandler()
         }
-        completionHandler()
     }
 
     private func registerNotificationCategories() {
-        let dismiss = UNNotificationAction(
-            identifier: "DISMISS",
-            title: "稍后再说",
-            options: []
-        )
         let exercise = UNNotificationAction(
-            identifier: "EXERCISE",
+            identifier: EyeBreakNotification.actionExercise,
             title: "做护眼动作",
             options: [.foreground]
         )
-        let category = UNNotificationCategory(
-            identifier: "EYEBREAK",
+        let dismiss = UNNotificationAction(
+            identifier: EyeBreakNotification.actionDismiss,
+            title: "稍后再说",
+            options: []
+        )
+        let breakCategory = UNNotificationCategory(
+            identifier: EyeBreakNotification.category,
             actions: [exercise, dismiss],
             intentIdentifiers: [],
             options: []
         )
-        UNUserNotificationCenter.current().setNotificationCategories([category])
+
+        // 紧急解除是非前台动作：系统会在后台唤起 App 执行，
+        // 用户不必自己找到并打开 EyeBreak 就能恢复被遮挡的应用。
+        let release = UNNotificationAction(
+            identifier: EyeBreakNotification.actionRelease,
+            title: "立即解除遮罩",
+            options: []
+        )
+        let recoveryCategory = UNNotificationCategory(
+            identifier: EyeBreakNotification.categoryRecovery,
+            actions: [release],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        UNUserNotificationCenter.current()
+            .setNotificationCategories([breakCategory, recoveryCategory])
     }
 }

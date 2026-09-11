@@ -7,11 +7,179 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# P2-5：固定 runner 与工具版本，避免 macos-latest 随镜像漂移导致构建不可复现。
+env:
+  XCODEGEN_VERSION: "2.43.0"
+
 jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: |
+          brew install xcodegen --quiet
+          xcodegen --version
+
+      - name: Generate Xcode project
+        working-directory: EyeBreak
+        run: |
+          # Local.xcconfig 保存开发者个人 Team ID，已 gitignore。
+          # CI 无需签名，创建空文件满足 configFiles 引用即可。
+          touch Local.xcconfig
+          xcodegen generate
+
+      # XcodeGen 的 info: / entitlements: 键是「生成」语义，会覆盖仓库里手写的文件。
+      # 一旦发生，扩展照样编译通过，但 NSExtensionPointIdentifier 和 Family Controls
+      # 权限全部丢失，真机上表现为「装得上、什么都不触发」，极难排查。
+      - name: Verify extension plists and entitlements survived generation
+        working-directory: EyeBreak
+        run: |
+          set -euo pipefail
+          fail=0
+
+          check_extension_point () {
+            file="$1"; expected="$2"
+            got=$(/usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$file" 2>/dev/null || echo MISSING)
+            if [ "$got" != "$expected" ]; then
+              echo "::error file=$file::NSExtensionPointIdentifier is '$got', expected '$expected'"
+              fail=1
+            else
+              echo "ok   $file -> $got"
+            fi
+          }
+
+          check_extension_point DeviceActivityReport/Info.plist  com.apple.deviceactivity.report
+          check_extension_point DeviceActivityMonitor/Info.plist com.apple.deviceactivity.monitor
+          check_extension_point ShieldConfiguration/Info.plist   com.apple.ManagedSettings.ShieldConfigurationExtension
+          check_extension_point ShieldAction/Info.plist          com.apple.ManagedSettings.ShieldActionExtension
+
+          for f in EyeBreak/EyeBreak.entitlements \
+                   DeviceActivityReport/DeviceActivityReport.entitlements \
+                   DeviceActivityMonitor/DeviceActivityMonitor.entitlements \
+                   ShieldConfiguration/ShieldConfiguration.entitlements \
+                   ShieldAction/ShieldAction.entitlements; do
+            if ! /usr/libexec/PlistBuddy -c "Print :com.apple.developer.family-controls" "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::missing com.apple.developer.family-controls"
+              fail=1
+            elif ! /usr/libexec/PlistBuddy -c "Print :com.apple.security.application-groups:0" "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::missing App Group"
+              fail=1
+            else
+              echo "ok   $f"
+            fi
+          done
+
+          exit $fail
+
+      # Xcode 不校验 NSExtensionPrincipalClass 字符串，写错了照样编译通过、
+      # 运行时却加载不到扩展。这一步断言：要么 principal class 指向源码中真实存在的
+      # 类型，要么该扩展以 @main 作为入口且不声明 principal class。
+      - name: Verify extension entry points resolve to real symbols
+        working-directory: EyeBreak
+        run: |
+          set -euo pipefail
+          fail=0
+
+          check_entry_point () {
+            dir="$1"
+            plist="$dir/Info.plist"
+            pc=$(/usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPrincipalClass" "$plist" 2>/dev/null || echo "")
+
+            if [ -z "$pc" ]; then
+              if grep -rq "@main" "$dir"; then
+                echo "ok   $dir: @main entry point, no principal class"
+              else
+                echo "::error file=$plist::neither NSExtensionPrincipalClass nor @main"
+                fail=1
+              fi
+              return
+            fi
+
+            symbol="${pc##*.}"
+            if grep -rqE "(class|struct)[[:space:]]+${symbol}([[:space:]]*:|[[:space:]]*\{)" "$dir"; then
+              echo "ok   $dir: principal class ${symbol} exists"
+            else
+              echo "::error file=$plist::principal class '${symbol}' not found in $dir sources"
+              fail=1
+            fi
+          }
+
+          check_entry_point DeviceActivityReport
+          check_entry_point DeviceActivityMonitor
+          check_entry_point ShieldConfiguration
+          check_entry_point ShieldAction
+
+          exit $fail
+
+      # P1-7：检测算法是纯函数，可离线单测，不依赖真机或 Family Controls。
+      - name: Run unit tests
+        working-directory: EyeBreak
+        run: |
+          xcodebuild test \
+            -project EyeBreak.xcodeproj \
+            -scheme EyeBreakTests \
+            -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify --renderer github-actions || \
+          xcodebuild test \
+            -project EyeBreak.xcodeproj \
+            -scheme EyeBreakTests \
+            -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Build (compile check — signing disabled)
+        working-directory: EyeBreak
+        run: |
+          xcodebuild build \
+            -project EyeBreak.xcodeproj \
+            -scheme EyeBreak \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM=""
+
+      # 编译通过不代表资源和扩展真的进了 App 包，这里逐项断言产物。
+      - name: Verify app bundle contents
+        run: |
+          set -euo pipefail
+          APP=$(find ~/Library/Developer/Xcode/DerivedData -type d -name "EyeBreak.app" -path "*Debug-iphoneos*" | head -1)
+          test -n "$APP" || { echo "::error::EyeBreak.app not found"; exit 1; }
+          echo "app bundle: $APP"
+          fail=0
+
+          if [ -f "$APP/eye_exercise.mp4" ]; then
+            echo "ok   eye_exercise.mp4 ($(du -h "$APP/eye_exercise.mp4" | cut -f1))"
+          else
+            echo "::error::eye_exercise.mp4 missing from app bundle"
+            fail=1
+          fi
+
+          for ext in DeviceActivityReport DeviceActivityMonitor ShieldConfiguration ShieldAction; do
+            if [ -d "$APP/PlugIns/$ext.appex" ]; then
+              echo "ok   $ext.appex embedded"
+            else
+              echo "::error::$ext.appex not embedded"
+              fail=1
+            fi
+          done
+
+          exit $fail
+
   # 在模拟器里跑起来并截图。Family Controls 在模拟器不可用，
   # 但护眼引导界面（Kill Test #2 的验收对象）不依赖任何权限，可以直接验收。
+  # P2-6：仅在 UI 相关文件变动或手动触发时运行，避免无谓消耗 macOS 额度。
   preview:
-    runs-on: macos-latest
+    runs-on: macos-15
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
 
@@ -20,7 +188,11 @@ jobs:
 
       - name: Generate Xcode project
         working-directory: EyeBreak
-        run: xcodegen generate
+        run: |
+          # Local.xcconfig 保存开发者个人 Team ID，已 gitignore。
+          # CI 无需签名，创建空文件满足 configFiles 引用即可。
+          touch Local.xcconfig
+          xcodegen generate
 
       - name: Build for simulator
         working-directory: EyeBreak
@@ -88,102 +260,3 @@ jobs:
           name: eyebreak-screenshots
           path: EyeBreak/shots/*.png
           if-no-files-found: warn
-
-  build:
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Show Xcode version
-        run: xcodebuild -version
-
-      - name: Install XcodeGen
-        run: brew install xcodegen --quiet
-
-      - name: Generate Xcode project
-        working-directory: EyeBreak
-        run: xcodegen generate
-
-      # XcodeGen 的 info: / entitlements: 键是「生成」语义，会覆盖仓库里手写的文件。
-      # 一旦发生，扩展照样编译通过，但 NSExtensionPointIdentifier 和 Family Controls
-      # 权限全部丢失，真机上表现为「装得上、什么都不触发」，极难排查。
-      # 这一步在生成之后断言这些关键内容仍然存在。
-      - name: Verify extension plists and entitlements survived generation
-        working-directory: EyeBreak
-        run: |
-          set -euo pipefail
-          fail=0
-
-          check_extension_point () {
-            file="$1"; expected="$2"
-            got=$(/usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$file" 2>/dev/null || echo MISSING)
-            if [ "$got" != "$expected" ]; then
-              echo "::error file=$file::NSExtensionPointIdentifier is '$got', expected '$expected'"
-              fail=1
-            else
-              echo "ok   $file -> $got"
-            fi
-          }
-
-          check_extension_point DeviceActivityReport/Info.plist  com.apple.deviceactivity.report
-          check_extension_point DeviceActivityMonitor/Info.plist com.apple.deviceactivity.monitor
-          check_extension_point ShieldConfiguration/Info.plist   com.apple.ManagedSettings.ShieldConfigurationExtension
-          check_extension_point ShieldAction/Info.plist          com.apple.ManagedSettings.ShieldActionExtension
-
-          for f in EyeBreak/EyeBreak.entitlements \
-                   DeviceActivityReport/DeviceActivityReport.entitlements \
-                   DeviceActivityMonitor/DeviceActivityMonitor.entitlements \
-                   ShieldConfiguration/ShieldConfiguration.entitlements \
-                   ShieldAction/ShieldAction.entitlements; do
-            if ! /usr/libexec/PlistBuddy -c "Print :com.apple.developer.family-controls" "$f" >/dev/null 2>&1; then
-              echo "::error file=$f::missing com.apple.developer.family-controls"
-              fail=1
-            elif ! /usr/libexec/PlistBuddy -c "Print :com.apple.security.application-groups:0" "$f" >/dev/null 2>&1; then
-              echo "::error file=$f::missing App Group"
-              fail=1
-            else
-              echo "ok   $f"
-            fi
-          done
-
-          exit $fail
-
-      - name: Build (compile check — signing disabled)
-        working-directory: EyeBreak
-        run: |
-          xcodebuild build \
-            -project EyeBreak.xcodeproj \
-            -scheme EyeBreak \
-            -destination 'generic/platform=iOS' \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM=""
-
-      # 编译通过不代表资源和扩展真的进了 App 包，这里逐项断言产物。
-      - name: Verify app bundle contents
-        run: |
-          set -euo pipefail
-          APP=$(find ~/Library/Developer/Xcode/DerivedData -type d -name "EyeBreak.app" -path "*Debug-iphoneos*" | head -1)
-          test -n "$APP" || { echo "::error::EyeBreak.app not found"; exit 1; }
-          echo "app bundle: $APP"
-          fail=0
-
-          if [ -f "$APP/eye_exercise.mp4" ]; then
-            echo "ok   eye_exercise.mp4 ($(du -h "$APP/eye_exercise.mp4" | cut -f1))"
-          else
-            echo "::error::eye_exercise.mp4 missing from app bundle"
-            fail=1
-          fi
-
-          for ext in DeviceActivityReport DeviceActivityMonitor ShieldConfiguration ShieldAction; do
-            if [ -d "$APP/PlugIns/$ext.appex" ]; then
-              echo "ok   $ext.appex embedded"
-            else
-              echo "::error::$ext.appex not embedded"
-              fail=1
-            fi
-          done
-
-          exit $fail

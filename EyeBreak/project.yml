@@ -21,6 +21,13 @@ configs:
   Debug:   debug
   Release: release
 
+# P2-9：签名身份写在本地 Local.xcconfig（已 gitignore），
+# 不再由脚本 sed 改动被 git 追踪的 project.yml，避免个人 Team ID 被误提交。
+# 运行 setup.sh 会生成该文件；CI 上生成一个空文件即可。
+configFiles:
+  Debug:   Local.xcconfig
+  Release: Local.xcconfig
+
 targets:
 
   # ─── 主 App ──────────────────────────────────────────────────────────────────
@@ -55,6 +62,20 @@ targets:
       - sdk: ManagedSettings.framework
       - sdk: UserNotifications.framework
       - sdk: AVKit.framework
+
+  # ─── 单元测试（纯逻辑，无宿主 App） ──────────────────────────────────────────
+  # Shared 直接编入测试 target，因此检测算法可在 CI 上离线验证，
+  # 不依赖真机、Family Controls 或签名。
+  EyeBreakTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: EyeBreakTests
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.eyebreak.app.tests
+        GENERATE_INFOPLIST_FILE: YES
 
   # ─── Layer 1: DeviceActivityReport Extension ─────────────────────────────────
   # Reads ActivitySegment.longestActivity — the most direct continuous-use signal.
@@ -126,3 +147,5 @@ targets:
         CODE_SIGN_ENTITLEMENTS: ShieldAction/ShieldAction.entitlements
     dependencies:
       - sdk: ManagedSettings.framework
+      - sdk: DeviceActivity.framework
+      - sdk: UserNotifications.framework
