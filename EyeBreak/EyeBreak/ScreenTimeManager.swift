@@ -3,15 +3,17 @@ import FamilyControls
 import DeviceActivity
 import ManagedSettings
 import UserNotifications
+import OSLog
+
+/// 诊断日志。使用 .public 的只有固定文案，动态内容默认按 .private 脱敏，
+/// 避免把用户的使用时长细节写进系统日志。
+private let eyeBreakLog = Logger(subsystem: "com.eyebreak.app", category: "detection")
 
 // MARK: - 名称（与 Monitor 扩展保持一致）
 
 extension DeviceActivityName {
     static let eyeBreakUsage  = DeviceActivityName("com.eyebreak.monitor.usage")
     static let shieldWatchdog = DeviceActivityName("com.eyebreak.monitor.shieldWatchdog")
-    // 旧版本遗留，stopMonitoring 时一并停掉
-    static let legacyWindowed = DeviceActivityName("com.eyebreak.monitor.windowed")
-    static let legacyDaily    = DeviceActivityName("com.eyebreak.monitor.daily")
 }
 
 extension DeviceActivityEvent.Name {
@@ -148,7 +150,7 @@ class ScreenTimeManager: ObservableObject {
     }
 
     func stopMonitoring() {
-        center.stopMonitoring([.eyeBreakUsage, .shieldWatchdog, .legacyWindowed, .legacyDaily])
+        center.stopMonitoring([.eyeBreakUsage, .shieldWatchdog])
         unshield()
         UserDefaults.eyeBreak.eb_clearTriggerState()
         reconcileMonitoringState()
@@ -262,5 +264,6 @@ class ScreenTimeManager: ObservableObject {
         let entry = "[\(ts)] \(msg)"
         log.append(entry)
         if log.count > 200 { log.removeFirst(log.count - 200) }
+        eyeBreakLog.debug("\(msg, privacy: .private)")
     }
 }
